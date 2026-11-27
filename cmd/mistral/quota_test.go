@@ -58,11 +58,11 @@ func TestParseQuotaSnapshotFromBillingPayload(t *testing.T) {
 	if snapshot.API.UsagePercentage != 15.7401036 || snapshot.API.InitialBudget != 15 {
 		t.Fatalf("api budget = %#v", snapshot.API)
 	}
-	if snapshot.Applicable != "vibe" {
-		t.Fatalf("applicable = %q, want vibe for a CHAT key", snapshot.Applicable)
+	if snapshot.Applicable != "api" {
+		t.Fatalf("applicable = %q, want api for plugin traffic", snapshot.Applicable)
 	}
-	if !snapshot.autoDisabled() {
-		t.Fatalf("a CHAT key at 100%% vibe must auto-disable")
+	if snapshot.autoDisabled() {
+		t.Fatalf("an API allowance at 15.7%% must not auto-disable")
 	}
 	if !snapshot.API.ResetAt.Equal(time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("api reset = %v", snapshot.API.ResetAt)
@@ -79,7 +79,7 @@ func TestParseQuotaSnapshotFromBillingPayload(t *testing.T) {
 	if used < 2.3610 || used > 2.3611 {
 		t.Fatalf("used = %v", used)
 	}
-	if view["auto_disabled"] != true || view["applicable"] != "vibe" {
+	if view["auto_disabled"] != false || view["applicable"] != "api" {
 		t.Fatalf("view = %#v", view)
 	}
 	vibe, _ := view["vibe"].(map[string]any)
@@ -131,27 +131,22 @@ func TestQuotaScopeResolution(t *testing.T) {
 	fresh := func() *quotaBudget { return budgetPointer(1, 15, future, false) }
 	cases := []struct {
 		name      string
-		planType  string
 		api, vibe *quotaBudget
 		want      string
 		disabled  bool
 	}{
-		{"chat key uses vibe", "CHAT", fresh(), exhausted("USD"), "vibe", true},
-		{"chat key ignores an exhausted api allowance", "CHAT", exhausted("USD"), fresh(), "vibe", false},
-		{"mistral code key uses vibe", "MISTRAL_CODE", fresh(), exhausted("USD"), "vibe", true},
-		{"api key uses api", "API", exhausted("USD"), fresh(), "api", true},
-		{"api key ignores an exhausted vibe allowance", "API", fresh(), exhausted("USD"), "api", false},
-		{"unknown scope with both budgets never disables", "", exhausted("USD"), exhausted("USD"), "", false},
-		{"unknown scope with only vibe uses it", "", nil, exhausted("USD"), "vibe", true},
-		{"unknown scope with only api uses it", "", exhausted("USD"), nil, "api", true},
-		{"chat scope does not borrow an exhausted api budget", "CHAT", exhausted("USD"), nil, "", false},
-		{"api scope does not borrow an exhausted vibe budget", "API", nil, exhausted("USD"), "", false},
-		{"payg keeps a chat key usable", "CHAT", fresh(), budgetPointer(140, 150, future, true), "vibe", false},
+		{"api allowance is always the plugin allowance", fresh(), exhausted("USD"), "api", false},
+		{"exhausted api allowance disables the key", exhausted("USD"), fresh(), "api", true},
+		{"exhausted vibe allowance never disables", fresh(), exhausted("USD"), "api", false},
+		{"only a vibe allowance leaves the destination unknown", nil, exhausted("USD"), "", false},
+		{"only an api allowance is enough", exhausted("USD"), nil, "api", true},
+		{"no budgets never disables", nil, nil, "", false},
+		{"payg api keeps the key usable", budgetPointer(140, 15, future, true), exhausted("USD"), "api", false},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			snapshot := quotaSnapshot{
-				PlanType: item.planType, API: item.api, Vibe: item.vibe,
+				API: item.api, Vibe: item.vibe,
 				FetchedAt: time.Now(),
 			}
 			snapshot.resolveApplicable()
@@ -266,14 +261,14 @@ func TestRefreshQuotaCredentialAgainstBillingServer(t *testing.T) {
 	if snapshot.Error != "" {
 		t.Fatalf("refresh failed: %s", snapshot.Error)
 	}
-	if snapshot.PlanName != "INDIVIDUAL" || snapshot.PlanType != "CHAT" || snapshot.Applicable != "vibe" {
+	if snapshot.PlanName != "INDIVIDUAL" || snapshot.PlanType != "CHAT" || snapshot.Applicable != "api" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	if snapshot.Vibe == nil || snapshot.API == nil || snapshot.Vibe.UsagePercentage != 0.5 || snapshot.Vibe.Currency != "EUR" {
 		t.Fatalf("budgets = %#v / %#v", snapshot.API, snapshot.Vibe)
 	}
 	stored, ok := quotaSnapshotFor("key")
-	if !ok || stored.PlanName != "INDIVIDUAL" || stored.Applicable != "vibe" {
+	if !ok || stored.PlanName != "INDIVIDUAL" || stored.Applicable != "api" {
 		t.Fatalf("stored snapshot = %#v / %t", stored, ok)
 	}
 }
@@ -294,14 +289,14 @@ func TestRefreshQuotaWhoamiFailureLeavesScopeUnknown(t *testing.T) {
 	if snapshot.Error != "" {
 		t.Fatalf("whoami failure must not be a billing error: %s", snapshot.Error)
 	}
-	if snapshot.Applicable != "" {
-		t.Fatalf("applicable = %q, want empty without a scope", snapshot.Applicable)
+	if snapshot.Applicable != "api" {
+		t.Fatalf("applicable = %q, want api without a scope", snapshot.Applicable)
 	}
-	if quotaExhaustedFor(current, "key") {
-		t.Fatalf("an unknown scope must not disable the credential")
+	if !quotaExhaustedFor(current, "key") {
+		t.Fatalf("both API and Vibe allowances at 100%% must disable the credential")
 	}
 	view := quotaView("key", true)
-	if view["auto_disabled"] != false || view["applicable"] != "" {
+	if view["auto_disabled"] != true || view["applicable"] != "api" {
 		t.Fatalf("view = %#v", view)
 	}
 	for _, key := range []string{"api", "vibe"} {
@@ -423,19 +418,25 @@ func TestSubscriptionPaygFallback(t *testing.T) {
 	// The budget document omits the per-allowance payg flags; the
 	// subscription-level flag is the account-wide fallback.
 	subscription := []byte(`{"plan_name":"INDIVIDUAL","payg_enabled":true}`)
-	budget := []byte(`{"vibe_budget":{"usage_percentage":100.0,"initial_budget":150.0,"currency":"USD","reset_at":"` + reset + `"}}`)
+	budget := []byte(`{"vibe_budget":{"usage_percentage":100.0,"initial_budget":150.0,"currency":"USD","reset_at":"` + reset + `"},"api_budget":{"usage_percentage":100.0,"initial_budget":15.0,"currency":"USD","reset_at":"` + reset + `"}}`)
 	snapshot := parseQuotaSnapshot(subscription, budget, []byte(testWhoamiCHAT), time.Now())
-	if snapshot.Vibe == nil || !snapshot.Vibe.PaygEnabled {
-		t.Fatalf("vibe payg should fall back to the subscription: %#v", snapshot.Vibe)
+	if snapshot.API == nil || !snapshot.API.PaygEnabled {
+		t.Fatalf("api payg should fall back to the subscription: %#v", snapshot.API)
 	}
 	if snapshot.autoDisabled() {
 		t.Fatalf("pay-as-you-go must keep the key usable past 100%%")
 	}
-	// An explicit per-allowance flag still wins over the account-wide one.
+	// The Vibe flag does not govern API traffic.
 	explicit := []byte(`{"plan_name":"INDIVIDUAL","payg_enabled":true,"vibe_payg_enabled":false}`)
 	snapshot = parseQuotaSnapshot(explicit, budget, []byte(testWhoamiCHAT), time.Now())
-	if snapshot.autoDisabled() != true {
-		t.Fatalf("vibe_payg_enabled=false should override the account fallback")
+	if snapshot.autoDisabled() {
+		t.Fatalf("vibe_payg_enabled=false must not pause API traffic")
+	}
+	// A per-allowance API flag still wins over the account-wide one.
+	noAPIPayg := []byte(`{"vibe_budget":{"usage_percentage":100.0,"initial_budget":150.0,"currency":"USD","reset_at":"` + reset + `"},"api_budget":{"usage_percentage":100.0,"initial_budget":15.0,"currency":"USD","reset_at":"` + reset + `","payg_enabled":false}}`)
+	snapshot = parseQuotaSnapshot(subscription, noAPIPayg, []byte(testWhoamiCHAT), time.Now())
+	if !snapshot.autoDisabled() {
+		t.Fatalf("api payg=false should pause plugin traffic")
 	}
 }
 
@@ -517,7 +518,7 @@ func TestAdminQuotaActionReadsBilling(t *testing.T) {
 	}
 	credential, _ := credentials[0].(map[string]any)
 	quota, _ := credential["quota"].(map[string]any)
-	if quota == nil || quota["plan"] != "EDU" || quota["applicable"] != "vibe" || quota["auto_disabled"] != true {
+	if quota == nil || quota["plan"] != "EDU" || quota["applicable"] != "api" || quota["auto_disabled"] != false {
 		t.Fatalf("quota view = %#v", credential["quota"])
 	}
 	if state["active"] != "" {
@@ -583,7 +584,7 @@ func TestWhoamiCachedBetweenRefreshes(t *testing.T) {
 		t.Fatalf("budget calls = %d, want 2", got)
 	}
 	snapshot, ok := quotaSnapshotFor("key")
-	if !ok || snapshot.PlanType != "CHAT" || snapshot.Applicable != "vibe" {
+	if !ok || snapshot.PlanType != "CHAT" || snapshot.Applicable != "api" {
 		t.Fatalf("scope was not retained on the cached cycle: %#v", snapshot)
 	}
 }
@@ -596,19 +597,19 @@ func TestWhoamiFailureKeepsKnownScope(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		_, _ = w.Write([]byte(`{"vibe_budget":{"usage_percentage":100.0,"initial_budget":150.0,"currency":"USD","reset_at":"` + reset.Format(time.RFC3339) + `"}}`))
+		_, _ = w.Write([]byte(`{"vibe_budget":{"usage_percentage":100.0,"initial_budget":150.0,"currency":"USD","reset_at":"` + reset.Format(time.RFC3339) + `"},"api_budget":{"usage_percentage":100.0,"initial_budget":15.0,"currency":"USD","reset_at":"` + reset.Format(time.RFC3339) + `"}}`))
 	}))
 	defer server.Close()
 	current := settings{BaseURL: server.URL + "/v1", ConsoleURL: server.URL, QuotaMonitoring: true}
 	cred := credential{ID: "key", APIKey: "test-key"}
 	setQuotaSnapshot("key", quotaSnapshot{
-		PlanType: "CHAT", Applicable: "vibe",
+		PlanType: "CHAT", Applicable: "api",
 		WhoamiFetchedAt: time.Now().Add(-2 * whoamiCacheTTL), FetchedAt: time.Now().Add(-2 * whoamiCacheTTL),
-		Vibe: budgetPointer(100, 150, reset, false),
+		API: budgetPointer(100, 15, reset, false), Vibe: budgetPointer(100, 150, reset, false),
 	})
 	refreshQuotaCredential(current, cred, "")
 	snapshot, ok := quotaSnapshotFor("key")
-	if !ok || snapshot.PlanType != "CHAT" || snapshot.Applicable != "vibe" {
+	if !ok || snapshot.PlanType != "CHAT" || snapshot.Applicable != "api" {
 		t.Fatalf("a failed scope refresh erased the known scope: %#v", snapshot)
 	}
 	if !snapshot.autoDisabled() || !quotaExhaustedFor(current, "key") {

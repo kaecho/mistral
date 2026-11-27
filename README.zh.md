@@ -25,7 +25,7 @@
 - 稳定下发 `prompt_cache_key`，并同步到 `x-affinity` 头，让 Mistral 的负载均衡把同一会话固定到已缓存该前缀的节点。客户端带了 key 就用客户端的，否则按会话内容根（system 指令 + 首条用户消息）生成，同一会话的后续轮次和压缩重放都能命中同一个节点。
 - 流式请求长时间没有新字节时自动截断，避免客户端一直挂着。
 - 可选忽略 CPA 的全局代理；宿主 HTTP 桥没有直连开关时，插件可以自己直连上游。
-- 读取 Mistral 账单接口（`/billing/subscription` 和 `/billing/budget`）里的月度额度，在控制台显示 API 额度和 Vibe Code 额度；某一类额度用尽时自动绕开这把 key，到重置日期后自动恢复。
+- 读取 Mistral 账单接口（`/billing/subscription` 和 `/billing/budget`）里的月度额度，在控制台显示 API 额度和 Vibe Code 额度；API 额度用尽时自动绕开这把 key，到重置日期后自动恢复。
 - 控制台支持中文和英文，首次加载跟随 CPA 的语言，也可以手动切换。
 
 ## 安装
@@ -106,7 +106,7 @@ plugins:
 | --- | --- |
 | `base-url` | Mistral API 地址，带 `/v1`。默认 `https://api.mistral.ai/v1`。模型列表和账单接口始终走这个地址。 |
 | `endpoint` | `auto`（默认）、`openai` 或 `native`。`auto` 在官方地址上用 `https://api.mistral.ai/openai/v1/chat/completions`，自定义地址上保持原生 `/chat/completions`；`openai` 强制走兼容端点；`native` 强制回原生端点。兼容端点接受 `store=false`、`developer`、`reasoning_content`、`seed`、`user`、`metadata`、`max_completion_tokens` 等原生端点会 422 的字段，并直接返回 `reasoning_content`。 |
-| `console-url` | 控制台地址，用来读 `/api/vibe/whoami` 判断 key 的计费额度。默认 `https://console.mistral.ai`。留空则不判断 key 类型，也不会自动停用。 |
+| `console-url` | 控制台地址，用来读 `/api/vibe/whoami` 显示 key 类型和套餐名。默认 `https://console.mistral.ai`。留空则控制台不显示 key 类型；自动停用只看 `api_budget`，不受影响。 |
 | `log-retention` | 保留多少条请求日志，范围 10 到 5000。 |
 | `stream-idle-seconds` | 流式空闲截断。0 关闭，大于 0 时上游超过这个秒数没有新字节就取消本次请求。 |
 | `failover` | 打开后，上游失败会按优先级尝试下一把凭据。关闭时只用当前排在最前的一把。 |
@@ -189,11 +189,11 @@ GET {console-url}/api/vibe/whoami
 - `api_budget`：普通 API 和 Studio 的用量。
 - `vibe_budget`：Vibe Code 的用量。
 
-用哪一份额度不取决于模型名，而取决于 key 的类型：Mistral 把计费额度绑在 key 的 scope 上。Vibe 类型的 key（`/whoami` 里 `plan_type` 是 `CHAT` 或 `MISTRAL_CODE`）所有请求都计入 Vibe Code 额度，普通 chat 模型也一样；Studio API 类型的 key（`plan_type` 是 `API`）所有请求都计入 API 额度。插件用同一把 key 请求 `/api/vibe/whoami` 来确认 scope。
+这两份额度是分开的：`vibe_budget` 只给 Vibe 官方产品（网页、CLI、编辑器插件）用，`api_budget` 给 API 用。Mistral 的订阅文档明确写了，通过非 Mistral 产品（第三方工具、harness）产生的用量计入 **API 月度额度**。本插件就是第三方工具，所以不管 key 的 scope 是 `CHAT`、`MISTRAL_CODE` 还是 `API`，插件转发出去的请求都只消耗 `api_budget`。`/api/vibe/whoami` 仍然读取，用来在控制台显示 key 类型和套餐名，但不参与自动停用判断。
 
-两份额度按凭据缓存在本地：「凭据」页显示已用 / 总额、进度条、套餐名、key 类型和重置时间，「概览」页显示紧凑的摘要；当前 key 计费的那一份会标出来。页面每 30 秒用缓存重绘一次，后台按 `quota-refresh-seconds` 读取账单，「刷新额度」按钮会立即读一次。
+两份额度按凭据缓存在本地：「凭据」页显示已用 / 总额、进度条、套餐名、key 类型和重置时间，「概览」页显示紧凑的摘要；插件实际会使用的 API 额度会标出来。页面每 30 秒用缓存重绘一次，后台按 `quota-refresh-seconds` 读取账单，「刷新额度」按钮会立即读一次。
 
-当这把 key 计费的那份额度达到 100%、且没有开启按量计费时，整把凭据会被移出调度。停用是整把 key，不按模型分：key 不能把流量换到另一份额度上。插件不会把自动停用写回 CPA 配置，手动停用仍然是手动停用，自动停用只是根据最近一次账单读数推导出来的。过了 `reset_at` 之后凭据自动重新可用，下一次后台检查确认新的额度。判断不出 key 类型时（whoami 请求失败，或两份额度都存在但没有 scope），插件继续使用这把 key；只有一份额度存在时按那一份处理。账单读取失败、或 key 没有权限查看账单时，插件不会停用任何东西。
+当 `api_budget` 达到 100%、且没有开启按量计费时，整把凭据会被移出调度。停用是整把 key，不按模型分。插件不会把自动停用写回 CPA 配置，手动停用仍然是手动停用，自动停用只是根据最近一次账单读数推导出来的。过了 `reset_at` 之后凭据自动重新可用，下一次后台检查确认新的额度。没有读到 `api_budget` 时视为未知，插件不会停用；账单读取失败、或 key 没有权限查看账单时也一样。
 
 最近一次读数和额度状态缓存在：
 

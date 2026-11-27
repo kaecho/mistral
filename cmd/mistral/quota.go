@@ -66,9 +66,11 @@ type quotaBudget struct {
 type quotaSnapshot struct {
 	PlanName string `json:"plan_name,omitempty"`
 	PlanType string `json:"plan_type,omitempty"`
-	// Applicable is "api" or "vibe": the allowance this key's traffic is
-	// billed against. Empty means the scope could not be determined, and the
-	// credential is never auto-disabled on a guess.
+	// Applicable is "api" whenever the billing read returned an API
+	// allowance. Plugin traffic is third-party API usage, and Mistral counts
+	// calls made through non-Mistral tools against the API monthly allowance
+	// even when the key belongs to a Vibe-scope account. Empty means the API
+	// allowance is unknown; the credential is never auto-disabled on a guess.
 	Applicable string `json:"applicable,omitempty"`
 	// WhoamiFetchedAt is the last scope-lookup attempt (successful or not),
 	// so an unreachable console is retried hourly instead of every cycle.
@@ -131,40 +133,22 @@ type subscriptionJSON struct {
 	Enterprise      bool   `json:"enterprise"`
 }
 
-// resolveApplicable picks the allowance a key's traffic is billed against.
-// Mistral ties the billing category to the key scope, not to the model: a
-// Vibe-scope key (plan_type CHAT or MISTRAL_CODE) charges the Vibe Code
-// allowance for every request, a Studio API-scope key charges the API
-// allowance. When the scope is not known, fall back to the only allowance
-// present; with both present, leave it empty so nothing is disabled on a guess.
+// resolveApplicable picks the allowance this plugin's traffic is billed
+// against. Every request this plugin forwards is third-party API usage, and
+// Mistral counts that against the API monthly allowance: a Vibe-scope key still
+// spends API budget when it is called by a non-Mistral tool. The Vibe allowance
+// only funds the official Vibe surfaces (web, CLI, editor extensions), so it
+// must never pause a key for plugin traffic.
+//
+// Without an API allowance the destination is unknown: leave Applicable empty
+// rather than falling back to Vibe, because disabling on the Vibe number is
+// exactly the mistake this separation avoids.
 func (snapshot *quotaSnapshot) resolveApplicable() {
 	if snapshot == nil {
 		return
 	}
-	switch strings.ToLower(strings.TrimSpace(snapshot.PlanType)) {
-	case "chat", "mistral_code":
-		// A Vibe-scope key never spends the API allowance, so an absent
-		// vibe_budget means "unknown", not "use the API one".
-		if snapshot.Vibe != nil {
-			snapshot.Applicable = "vibe"
-		} else {
-			snapshot.Applicable = ""
-		}
-		return
-	case "api":
-		if snapshot.API != nil {
-			snapshot.Applicable = "api"
-		} else {
-			snapshot.Applicable = ""
-		}
-		return
-	}
-	if snapshot.API != nil && snapshot.Vibe == nil {
+	if snapshot.API != nil {
 		snapshot.Applicable = "api"
-		return
-	}
-	if snapshot.Vibe != nil && snapshot.API == nil {
-		snapshot.Applicable = "vibe"
 		return
 	}
 	snapshot.Applicable = ""
@@ -180,9 +164,9 @@ func (snapshot quotaSnapshot) applicableBudget() *quotaBudget {
 	return nil
 }
 
-// autoDisabled reports whether the applicable allowance is spent. The
-// credential is then taken out of rotation as a whole: a key cannot move its
-// traffic to a different allowance.
+// autoDisabled reports whether the API allowance is spent. The credential is
+// then taken out of rotation as a whole: a key cannot move plugin traffic to
+// its Vibe allowance.
 func (snapshot quotaSnapshot) autoDisabled() bool {
 	return snapshot.applicableBudget().quotaExhausted()
 }

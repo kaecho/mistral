@@ -25,7 +25,7 @@ Connect Mistral to CLIProxyAPI (CPA). Clients keep using CPA's address and key.
 - Maintains a stable `prompt_cache_key` and mirrors it in the `x-affinity` header so Mistral's load balancer keeps one conversation on the cache node that already holds its prefix. The key comes from the client when present, otherwise from the conversation root (instructions plus first user message), so turns and compaction replays of the same history keep hitting the same node.
 - Cancels streaming requests that stop producing bytes for too long.
 - Optionally ignores CPA's global proxy when the host transport cannot reach the upstream directly.
-- Reads the included monthly allowance per credential from Mistral's billing API (`/billing/subscription` and `/billing/budget`), shows API and Vibe Code usage in the console, routes around a credential when its allowance is spent, and brings it back automatically at the reset date.
+- Reads the included monthly allowance per credential from Mistral's billing API (`/billing/subscription` and `/billing/budget`), shows API and Vibe Code usage in the console, routes around a credential when its API allowance is spent, and brings it back automatically at the reset date.
 - Runs the console in English or Chinese, follows the CPA language on first load, and keeps a manual language switch.
 
 ## Install
@@ -106,7 +106,7 @@ plugins:
 | --- | --- |
 | `base-url` | Mistral API base URL, including `/v1`. Defaults to `https://api.mistral.ai/v1`. Model listing and billing always use this address. |
 | `endpoint` | `auto` (default), `openai`, or `native`. `auto` uses `https://api.mistral.ai/openai/v1/chat/completions` on the official host and keeps the native `/chat/completions` path on a custom host; `openai` forces the compatibility facade; `native` forces the old route. The facade accepts `store=false`, `developer`, `reasoning_content`, `seed`, `user`, `metadata`, `max_completion_tokens` and similar fields the native route rejects with 422, and returns thinking as `reasoning_content` directly. |
-| `console-url` | Console origin used to read the key scope from `/api/vibe/whoami`. Defaults to `https://console.mistral.ai`. Empty disables scope detection, so nothing is paused automatically. |
+| `console-url` | Console origin used to show the key scope and plan from `/api/vibe/whoami`. Defaults to `https://console.mistral.ai`. Empty hides the scope; auto-pause only uses `api_budget` and is unaffected. |
 | `log-retention` | Number of request log entries to keep, from 10 to 5000. |
 | `stream-idle-seconds` | Stream idle cutoff. 0 disables it. Above 0, an upstream request is cancelled after this many seconds without new bytes. |
 | `failover` | When enabled, a failed upstream attempt moves to the next credential by priority. When disabled, only the first credential in the current order is used. |
@@ -189,11 +189,11 @@ GET {console-url}/api/vibe/whoami
 - `api_budget`: ordinary API and Studio spend.
 - `vibe_budget`: Vibe Code spend.
 
-Which one a key uses is not a property of the model: Mistral ties the billing category to the key scope. A Vibe-scope key (`plan_type` `CHAT` or `MISTRAL_CODE` in `/whoami`) charges the Vibe Code allowance for every request, including normal chat models; a Studio API-scope key (`plan_type` `API`) charges the API allowance. The plugin reads `/api/vibe/whoami` with the same key to learn that scope.
+The two allowances are separate: `vibe_budget` funds the official Vibe surfaces (web, CLI, editor extensions), and `api_budget` funds the API. Mistral's subscription docs state that usage made through non-Mistral products, such as third-party tools and harnesses, counts toward the **API monthly allowance**. This plugin is a third-party tool, so whether the key scope is `CHAT`, `MISTRAL_CODE`, or `API`, forwarded requests spend only `api_budget`. `/api/vibe/whoami` is still read to show the key scope and plan in the console, but it does not drive auto-pause.
 
-Both allowances are stored per credential and shown under Credentials (used / included, a progress bar, the plan name, the key scope, and the reset time) and as a compact summary on Overview. The applicable allowance is marked. The page repaints from the cached figures every 30 seconds, the background check refreshes billing on `quota-refresh-seconds`, and the Refresh allowance buttons read billing immediately.
+Both allowances are stored per credential and shown under Credentials (used / included, a progress bar, the plan name, the key scope, and the reset time) and as a compact summary on Overview. The API allowance the plugin actually spends is marked. The page repaints from the cached figures every 30 seconds, the background check refreshes billing on `quota-refresh-seconds`, and the Refresh allowance buttons read billing immediately.
 
-A credential is taken out of rotation when its applicable allowance reaches 100% and pay-as-you-go is off. This pauses the whole key, not one model category, because the key cannot move its traffic to the other allowance. Nothing is written to the CPA config: a manual disable stays manual, and the automatic pause is derived from the last billing read. Once `reset_at` passes, the credential is eligible again and the next background check confirms the new allowance. When the scope cannot be determined (whoami unreachable, or both allowances present with no scope), the plugin keeps serving; if only one allowance is present it falls back to that one. A billing read failure or a key without permission to see billing never disables anything.
+A credential is taken out of rotation when `api_budget` reaches 100% and pay-as-you-go is off. This pauses the whole key, not one model category. Nothing is written to the CPA config: a manual disable stays manual, and the automatic pause is derived from the last billing read. Once `reset_at` passes, the credential is eligible again and the next background check confirms the new allowance. When no API allowance was read, the destination is unknown and the plugin never auto-disables; the same holds for a billing read failure or a key without permission to see billing.
 
 The working state and the last read per credential are cached in:
 
