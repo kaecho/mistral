@@ -173,3 +173,54 @@ func TestIdleDefaultSurvivesConfigWithoutKey(t *testing.T) {
 		t.Fatalf("custom = %d, want 45", custom.StreamIdleSeconds)
 	}
 }
+
+func TestChatEndpointSelection(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   string
+		mode   string
+		want   string
+		compat bool
+	}{
+		{"official auto", defaultBaseURL, endpointAuto, openAICompatURL, true},
+		{"official openai", defaultBaseURL, endpointOpenAI, openAICompatURL, true},
+		{"official native", defaultBaseURL, endpointNative, defaultBaseURL + "/chat/completions", false},
+		{"custom auto", "https://proxy.example/v1", endpointAuto, "https://proxy.example/v1/chat/completions", false},
+		{"custom openai", "https://proxy.example/v1", endpointOpenAI, "https://proxy.example/openai/v1/chat/completions", true},
+		{"custom native", "https://proxy.example/v1", endpointNative, "https://proxy.example/v1/chat/completions", false},
+	}
+	for _, tc := range cases {
+		got, compat := (settings{BaseURL: tc.base, Endpoint: tc.mode}).chatEndpoint()
+		if got != tc.want || compat != tc.compat {
+			t.Fatalf("%s: endpoint=%q compat=%v, want %q %v", tc.name, got, compat, tc.want, tc.compat)
+		}
+	}
+}
+
+func TestParseEndpointSetting(t *testing.T) {
+	if got := parseSettings([]byte("endpoint: native\n")).Endpoint; got != endpointNative {
+		t.Fatalf("endpoint = %q", got)
+	}
+	if got := parseSettings([]byte("endpoint: openai\n")).Endpoint; got != endpointOpenAI {
+		t.Fatalf("endpoint = %q", got)
+	}
+	if got := parseSettings([]byte("endpoint: something-else\n")).Endpoint; got != endpointAuto {
+		t.Fatalf("unknown endpoint = %q, want auto", got)
+	}
+	if got := parseSettings(nil).Endpoint; got != endpointAuto {
+		t.Fatalf("default endpoint = %q, want auto", got)
+	}
+	// The wrapper YAML the host sends puts the plugin block under an indented
+	// key; the field still has to be found.
+	got := parseSettings([]byte("    mistral:\n      endpoint: native\n      base-url: \"https://api.mistral.ai/v1\"\n"))
+	if got.Endpoint != endpointNative {
+		t.Fatalf("nested endpoint = %q", got.Endpoint)
+	}
+}
+
+func TestRenderPluginBlockIncludesEndpoint(t *testing.T) {
+	block := renderPluginBlock(settings{BaseURL: defaultBaseURL})
+	if !strings.Contains(block, `endpoint: "auto"`) {
+		t.Fatalf("block missing endpoint:\n%s", block)
+	}
+}

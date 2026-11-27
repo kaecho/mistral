@@ -7,7 +7,7 @@ import (
 
 func TestClaudeToMistralChat(t *testing.T) {
 	body := []byte(`{"max_tokens":20,"system":"be brief","thinking":{"type":"enabled","budget_tokens":1000},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"calc"},{"type":"text","text":"4"},{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"},{"type":"text","text":"next"}]}]}`)
-	out, ok := toMistralChat(body, nil, "claude", "glm-5.3", false)
+	out, ok := toMistralChat(body, nil, "claude", "glm-5.3", false, false)
 	if !ok {
 		t.Fatal("expected conversion")
 	}
@@ -34,7 +34,7 @@ func TestClaudeToMistralChat(t *testing.T) {
 
 func TestResponsesToMistralChat(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"reasoning":{"effort":"low"},"max_output_tokens":10}`)
-	out, ok := toMistralChat(body, nil, "openai-response", "mistral-vibe-cli-latest", true)
+	out, ok := toMistralChat(body, nil, "openai-response", "mistral-vibe-cli-latest", true, false)
 	if !ok {
 		t.Fatal("expected conversion")
 	}
@@ -55,7 +55,7 @@ func TestResponsesToMistralChat(t *testing.T) {
 
 func TestGeminiToMistralChat(t *testing.T) {
 	body := []byte(`{"systemInstruction":{"parts":[{"text":"brief"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"ok"}]}],"generationConfig":{"maxOutputTokens":12,"thinkingConfig":{"thinkingBudget":256}}}`)
-	out, ok := toMistralChat(body, nil, "gemini", "glm-5.3", false)
+	out, ok := toMistralChat(body, nil, "gemini", "glm-5.3", false, false)
 	if !ok {
 		t.Fatal("expected conversion")
 	}
@@ -74,7 +74,7 @@ func TestGeminiToMistralChat(t *testing.T) {
 
 func TestOpenAIChatKeepsReasoningEffort(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4.1-flash","reasoning_effort":"max","messages":[{"role":"user","content":"hi"}]}`)
-	out, ok := toMistralChat(nil, body, "openai", "deepseek-v4-1-flash-1017", true)
+	out, ok := toMistralChat(nil, body, "openai", "deepseek-v4-1-flash-1017", true, false)
 	if !ok {
 		t.Fatal("expected conversion")
 	}

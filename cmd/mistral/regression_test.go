@@ -69,7 +69,7 @@ func TestQuoteYAMLEscapesBackslash(t *testing.T) {
 // from the upstream.
 func TestUnknownRoleKeepsOnlyRoleAndContent(t *testing.T) {
 	in := []byte(`{"model":"m","messages":[{"role":"weird","content":"hi","parallel_tool_calls":true,"cache_control":{"type":"ephemeral"}}]}`)
-	out, ok := rewriteRequestBody(in, []string{"*"}, "upstream-model", "upstream-model")
+	out, ok := rewriteRequestBody(in, []string{"*"}, "upstream-model", "upstream-model", false)
 	if !ok {
 		t.Fatal("expected rewrite")
 	}
@@ -80,5 +80,51 @@ func TestUnknownRoleKeepsOnlyRoleAndContent(t *testing.T) {
 	msg := doc["messages"].([]any)[0].(map[string]any)
 	if len(msg) != 2 || msg["role"] != "weird" || msg["content"] != "hi" {
 		t.Fatalf("unknown role message = %#v, want only role and content", msg)
+	}
+}
+
+func TestExecuteUsesOpenAICompatEndpointByDefault(t *testing.T) {
+	storeSettings(defaultSettings())
+	clearAllCredentialHealth()
+	t.Cleanup(func() {
+		storeSettings(defaultSettings())
+		clearAllCredentialHealth()
+	})
+	storeSettings(settings{
+		BaseURL: defaultBaseURL, Endpoint: endpointAuto, Failover: true, CooldownSeconds: 60,
+		Credentials: []credential{{ID: "a", Label: "A", APIKey: "ka", Priority: 10}},
+		Models:      []modelAlias{{Client: "m", Upstream: "upstream-model"}},
+	})
+	original := upstreamRequest
+	t.Cleanup(func() { upstreamRequest = original })
+	var seenURL string
+	var seenBody []byte
+	upstreamRequest = func(callbackID string, ignoreProxy bool, method, url string, headers map[string][]string, body []byte) (int, []byte, error) {
+		seenURL = url
+		seenBody = append([]byte(nil), body...)
+		return 200, []byte(`{"choices":[{"message":{"content":"4","reasoning_content":"because"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`), nil
+	}
+	request, _ := json.Marshal(map[string]any{
+		"Model": "m", "SourceFormat": "openai",
+		"OriginalRequest": []byte(`{"store":false,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"4","reasoning_content":"because"},{"role":"user","content":"again"}]}`),
+	})
+	raw := execute(request, false)
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("execute failed: %s", raw)
+	}
+	if seenURL != openAICompatURL {
+		t.Fatalf("upstream URL = %q, want %q", seenURL, openAICompatURL)
+	}
+	body := decodePayload(t, seenBody)
+	if _, exists := body["store"]; exists {
+		t.Fatal("store was forwarded")
+	}
+	assistant := body["messages"].([]any)[1].(map[string]any)
+	if assistant["reasoning_content"] != "because" {
+		t.Fatalf("reasoning_content = %#v", assistant["reasoning_content"])
+	}
+	if _, exists := assistant["content"].([]any); exists {
+		t.Fatalf("native thinking content was built: %#v", assistant["content"])
 	}
 }

@@ -192,6 +192,7 @@ func registrationJSON() []byte {
 			"GitHubRepository": "https://github.com/kaecho/mistral",
 			"ConfigFields": []map[string]string{
 				{"Name": "base-url", "Type": "string", "Description": "Mistral API base URL, including /v1."},
+				{"Name": "endpoint", "Type": "string", "Description": "auto, openai, or native. auto uses the /openai/v1 compatibility route on the official host."},
 				{"Name": "console-url", "Type": "string", "Description": "Mistral console origin used to read the key scope (/api/vibe/whoami). Empty disables scope detection."},
 				{"Name": "api-key", "Type": "string", "Description": "Mistral API key."},
 				{"Name": "models", "Type": "string", "Description": "Client model names, optionally client=upstream."},
@@ -303,7 +304,8 @@ func execute(request []byte, stream bool) []byte {
 	if len(candidates) > maxFailoverAttempts {
 		candidates = candidates[:maxFailoverAttempts]
 	}
-	payload, ok := toMistralChat(req.Payload, req.OriginalRequest, req.SourceFormat, upstream, stream)
+	chatURL, compat := current.chatEndpoint()
+	payload, ok := toMistralChat(req.Payload, req.OriginalRequest, req.SourceFormat, upstream, stream, compat)
 	if !ok {
 		return errorEnvelope("bad_request", "unsupported request body", http.StatusBadRequest)
 	}
@@ -322,7 +324,7 @@ func execute(request []byte, stream bool) []byte {
 		CacheAffinitySource: cache.AffinitySource,
 		PrefixHash:          payloadPrefixHash(payload),
 	}
-	upstreamURL := strings.TrimRight(current.BaseURL, "/") + chatPath
+	upstreamURL := chatURL
 	var lastStatus int
 	var lastErr string
 	attempts := 0

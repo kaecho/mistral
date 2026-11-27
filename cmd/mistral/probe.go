@@ -11,10 +11,7 @@ import (
 	"time"
 )
 
-const (
-	modelsPath = "/models"
-	chatPath   = "/chat/completions"
-)
+const modelsPath = "/models"
 
 type upstreamModel struct {
 	ID           string         `json:"id"`
@@ -354,7 +351,8 @@ func testModelAction(callbackID string, current settings, id, credentialID strin
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	started := time.Now()
-	status, body, err := httpDo(callbackID, current.IgnoreProxy, http.MethodPost, strings.TrimRight(current.BaseURL, "/")+chatPath, map[string][]string{
+	chatURL, _ := current.chatEndpoint()
+	status, body, err := httpDo(callbackID, current.IgnoreProxy, http.MethodPost, chatURL, map[string][]string{
 		"Authorization": {"Bearer " + cred.APIKey},
 		"Content-Type":  {"application/json"},
 		"Accept":        {"application/json"},

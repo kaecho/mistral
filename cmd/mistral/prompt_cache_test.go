@@ -195,7 +195,7 @@ func TestPromptCacheKeySkipsEmptyRequests(t *testing.T) {
 func TestPromptCacheKeySurvivesProtocolConversion(t *testing.T) {
 	// A Responses client that sent prompt_cache_key keeps it after conversion.
 	body := []byte(`{"prompt_cache_key":"conv-1","input":"hi","reasoning":{"effort":"low"}}`)
-	out, ok := toMistralChat(body, body, "openai-response", "mistral-vibe-cli-latest", false)
+	out, ok := toMistralChat(body, body, "openai-response", "mistral-vibe-cli-latest", false, false)
 	if !ok {
 		t.Fatal("expected conversion")
 	}

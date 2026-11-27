@@ -9,6 +9,16 @@ const (
 	defaultBaseURL  = "https://api.mistral.ai/v1"
 	configPath      = "/CLIProxyAPI/config.yaml"
 	pluginConfigKey = "mistral"
+	// The native Mistral route validates the body against a literal schema and
+	// answers 422 for anything outside it. The OpenAI-compatible facade on the
+	// same host accepts the OpenAI chat schema (store=false, developer role,
+	// reasoning_content, seed/user/metadata and so on) and flattens thinking
+	// into reasoning_content itself, so it is the default for the official API.
+	openAICompatURL  = "https://api.mistral.ai/openai/v1/chat/completions"
+	openAICompatPath = "/openai/v1/chat/completions"
+	endpointAuto     = "auto"
+	endpointOpenAI   = "openai"
+	endpointNative   = "native"
 	// defaultStreamIdleSeconds is how long a started stream may stay silent
 	// before it is treated as stalled. It matches the upstream Vibe client's
 	// 300s idle limit.
@@ -18,6 +28,7 @@ const (
 type settings struct {
 	BaseURL             string
 	ConsoleURL          string
+	Endpoint            string
 	LogRetention        int
 	StreamIdleSeconds   int
 	Failover            bool
@@ -56,6 +67,47 @@ func (s settings) upstream(client string) (string, string) {
 	return client, ""
 }
 
+// chatEndpoint returns the URL the chat request is posted to and whether that
+// URL speaks the OpenAI-compatible schema. The compatibility sanitizer works on
+// a different field set than the native one, so the two decisions travel
+// together.
+func (s settings) chatEndpoint() (string, bool) {
+	base := strings.TrimRight(s.BaseURL, "/")
+	switch normalizeEndpoint(s.Endpoint) {
+	case endpointNative:
+		return base + "/chat/completions", false
+	case endpointOpenAI:
+		return openAICompatURLFor(base), true
+	}
+	// A custom base URL is most likely a mirror or a gateway that only exposes
+	// the native route. Only the official host is known to serve the facade.
+	if base == defaultBaseURL {
+		return openAICompatURL, true
+	}
+	return base + "/chat/completions", false
+}
+
+// openAICompatURLFor mounts the facade next to the native /v1 prefix, so a
+// mirror of api.mistral.ai keeps working when it is selected explicitly.
+func openAICompatURLFor(base string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/v1") {
+		base = strings.TrimSuffix(base, "/v1")
+	}
+	return base + openAICompatPath
+}
+
+func normalizeEndpoint(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case endpointOpenAI, "openai-compatible", "compat":
+		return endpointOpenAI
+	case endpointNative, "legacy":
+		return endpointNative
+	default:
+		return endpointAuto
+	}
+}
+
 func (s settings) clientNames() []string {
 	names := make([]string, 0, len(s.Models))
 	for _, item := range s.Models {
@@ -83,6 +135,7 @@ func defaultSettings() settings {
 	return settings{
 		BaseURL:         defaultBaseURL,
 		ConsoleURL:      defaultConsoleURL,
+		Endpoint:        endpointAuto,
 		LogRetention:    200,
 		Failover:        true,
 		CooldownSeconds: 60,
@@ -117,6 +170,9 @@ func parseSettings(configYAML []byte) settings {
 	}
 	if parsed.ConsoleURL != nil {
 		current.ConsoleURL = strings.TrimRight(*parsed.ConsoleURL, "/")
+	}
+	if parsed.Endpoint != "" {
+		current.Endpoint = normalizeEndpoint(parsed.Endpoint)
 	}
 	if parsed.LogRetention > 0 {
 		current.LogRetention = parsed.LogRetention
@@ -156,6 +212,7 @@ func parseSettings(configYAML []byte) settings {
 type parsedSettings struct {
 	BaseURL             string
 	ConsoleURL          *string
+	Endpoint            string
 	APIKey              string
 	LogRetention        int
 	StreamIdleSeconds   *int
@@ -282,6 +339,8 @@ func parseSettingsText(text string) parsedSettings {
 		case name == "console-url" || name == "console_url":
 			console := value
 			out.ConsoleURL = &console
+		case name == "endpoint":
+			out.Endpoint = value
 		case name == "api-key" || name == "api_key":
 			out.APIKey = value
 		case name == "log-retention":
@@ -390,6 +449,7 @@ func renderPluginBlock(s settings) string {
 	buf.WriteString("      priority: 100\n")
 	fmt.Fprintf(&buf, "      base-url: %s\n", quoteYAML(s.BaseURL))
 	fmt.Fprintf(&buf, "      console-url: %s\n", quoteYAML(s.ConsoleURL))
+	fmt.Fprintf(&buf, "      endpoint: %s\n", quoteYAML(normalizeEndpoint(s.Endpoint)))
 	fmt.Fprintf(&buf, "      log-retention: %d\n", s.LogRetention)
 	fmt.Fprintf(&buf, "      stream-idle-seconds: %d\n", s.StreamIdleSeconds)
 	fmt.Fprintf(&buf, "      failover: %t\n", s.Failover)

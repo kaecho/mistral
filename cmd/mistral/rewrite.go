@@ -96,6 +96,18 @@ var unsupportedTopLevelFields = []string{
 	"text", "instructions", "input", "top_k", "prompt_mode",
 }
 
+// The OpenAI-compatible facade accepts the standard OpenAI fields the native
+// route 422s on (developer, seed, user, metadata, max_completion_tokens,
+// prompt_cache_key, store=false, reasoning_content), but it still rejects a
+// handful of real OpenAI parameters outright. Strip those, and always strip
+// store: the facade only accepts false, and this API is stateless either way.
+var compatUnsupportedTopLevelFields = []string{
+	"store", "logit_bias", "web_search", "web_search_options",
+	"continue_final_message", "prefix", "verbosity", "reasoning",
+	"text", "instructions", "input", "top_k", "prompt_mode",
+	"service_tier", "prompt_cache_retention", "cache_control",
+}
+
 // Each Mistral message role accepts its own field set; a field that belongs to
 // another role is a 422 rather than being ignored.
 var allowedMessageFields = map[string]map[string]bool{
@@ -105,7 +117,17 @@ var allowedMessageFields = map[string]map[string]bool{
 	"tool":      {"role": true, "content": true, "tool_call_id": true},
 }
 
-func rewriteRequestBody(body []byte, patterns []string, model, requested string) ([]byte, bool) {
+// The facade takes the OpenAI message shape. reasoning_content is legal here
+// and stays in place; native Mistral thinking blocks are not, so they are
+// flattened into reasoning_content before the request is sent.
+var compatMessageFields = map[string]map[string]bool{
+	"system":    {"role": true, "content": true},
+	"user":      {"role": true, "content": true},
+	"assistant": {"role": true, "content": true, "tool_calls": true, "reasoning_content": true, "name": true},
+	"tool":      {"role": true, "content": true, "tool_call_id": true},
+}
+
+func rewriteRequestBody(body []byte, patterns []string, model, requested string, compat bool) ([]byte, bool) {
 	if !modelMatches(patterns, model, requested) {
 		return nil, false
 	}
@@ -113,7 +135,7 @@ func rewriteRequestBody(body []byte, patterns []string, model, requested string)
 	if err := decodeJSON(body, &doc); err != nil {
 		return nil, false
 	}
-	if !rewriteRequestDoc(doc, model) {
+	if !rewriteRequestDoc(doc, model, compat) {
 		return nil, false
 	}
 	out, err := encodeJSON(doc)
@@ -127,7 +149,7 @@ func rewriteRequestBody(body []byte, patterns []string, model, requested string)
 // reports whether anything changed. Callers that converted another protocol
 // into a chat body hold that map already; running the sanitizer on it directly
 // saves decoding and re-encoding a payload that can be hundreds of kilobytes.
-func rewriteRequestDoc(doc map[string]any, model string) bool {
+func rewriteRequestDoc(doc map[string]any, model string, compat bool) bool {
 	changed := false
 	if reasoning, ok := doc["reasoning"].(map[string]any); ok {
 		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
@@ -136,7 +158,11 @@ func rewriteRequestDoc(doc map[string]any, model string) bool {
 			}
 		}
 	}
-	for _, key := range unsupportedTopLevelFields {
+	fields := unsupportedTopLevelFields
+	if compat {
+		fields = compatUnsupportedTopLevelFields
+	}
+	for _, key := range fields {
 		if _, ok := doc[key]; ok {
 			delete(doc, key)
 			changed = true
@@ -162,14 +188,14 @@ func rewriteRequestDoc(doc map[string]any, model string) bool {
 		if !ok {
 			continue
 		}
-		if rewriteMessage(msg) {
+		if rewriteMessage(msg, compat) {
 			changed = true
 		}
 	}
 	return changed
 }
 
-func rewriteMessage(msg map[string]any) bool {
+func rewriteMessage(msg map[string]any, compat bool) bool {
 	changed := false
 	role, _ := msg["role"].(string)
 	// OpenAI replaced the system role with "developer"; Mistral only knows the
@@ -179,30 +205,60 @@ func rewriteMessage(msg map[string]any) bool {
 		msg["role"] = role
 		changed = true
 	}
-	if reasoning := firstString(msg["reasoning_content"], msg["reasoning"]); reasoning != "" && role == "assistant" {
-		msg["content"] = appendThinking(msg["content"], reasoning)
-		changed = true
-	}
-	if allowed, known := allowedMessageFields[role]; known {
-		for key := range msg {
-			if allowed[key] {
-				continue
-			}
-			delete(msg, key)
+	if compat {
+		if flattenThinkingParts(msg) {
 			changed = true
 		}
-	} else {
-		// An unrecognized role still has to be sanitized. Dropping only the
-		// three known OpenAI extras left every other unknown field to reach the
-		// upstream, where it is a 422. Keep the role and its content and let
-		// everything else go: the request stays valid even if the upstream
-		// rejects the role itself.
-		for key := range msg {
-			if key == "role" || key == "content" {
-				continue
+		if reasoning := firstString(msg["reasoning"]); reasoning != "" && role == "assistant" {
+			if firstString(msg["reasoning_content"]) == "" {
+				msg["reasoning_content"] = reasoning
 			}
-			delete(msg, key)
+			delete(msg, "reasoning")
 			changed = true
+		}
+		if allowed, known := compatMessageFields[role]; known {
+			for key := range msg {
+				if allowed[key] {
+					continue
+				}
+				delete(msg, key)
+				changed = true
+			}
+		} else {
+			for key := range msg {
+				if key == "role" || key == "content" {
+					continue
+				}
+				delete(msg, key)
+				changed = true
+			}
+		}
+	} else {
+		if reasoning := firstString(msg["reasoning_content"], msg["reasoning"]); reasoning != "" && role == "assistant" {
+			msg["content"] = appendThinking(msg["content"], reasoning)
+			changed = true
+		}
+		if allowed, known := allowedMessageFields[role]; known {
+			for key := range msg {
+				if allowed[key] {
+					continue
+				}
+				delete(msg, key)
+				changed = true
+			}
+		} else {
+			// An unrecognized role still has to be sanitized. Dropping only the
+			// three known OpenAI extras left every other unknown field to reach the
+			// upstream, where it is a 422. Keep the role and its content and let
+			// everything else go: the request stays valid even if the upstream
+			// rejects the role itself.
+			for key := range msg {
+				if key == "role" || key == "content" {
+					continue
+				}
+				delete(msg, key)
+				changed = true
+			}
 		}
 	}
 	if parts, ok := msg["content"].([]any); ok {
@@ -213,6 +269,43 @@ func rewriteMessage(msg map[string]any) bool {
 	return changed
 }
 
+// flattenThinkingParts turns native Mistral content blocks into the
+// reasoning_content string the OpenAI facade accepts. A client replaying a
+// response it got from the native route would otherwise send thinking blocks
+// the facade cannot parse.
+func flattenThinkingParts(msg map[string]any) bool {
+	parts, ok := msg["content"].([]any)
+	if !ok {
+		return false
+	}
+	kept := make([]any, 0, len(parts))
+	var thought strings.Builder
+	sawThinking := false
+	for _, item := range parts {
+		part, isMap := item.(map[string]any)
+		if isMap {
+			if kind, _ := part["type"].(string); kind == "thinking" {
+				sawThinking = true
+				thought.WriteString(thinkingText(part["thinking"]))
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	if !sawThinking {
+		return false
+	}
+	if len(kept) == 0 {
+		msg["content"] = ""
+	} else {
+		msg["content"] = kept
+	}
+	if thought.Len() > 0 {
+		msg["reasoning_content"] = joinExisting(msg["reasoning_content"], thought.String())
+	}
+	return true
+}
+
 // Responses-style text parts are not part of Mistral's content unions.
 func normalizeContentParts(parts []any) bool {
 	changed := false
@@ -220,6 +313,12 @@ func normalizeContentParts(parts []any) bool {
 		part, ok := item.(map[string]any)
 		if !ok {
 			continue
+		}
+		if _, ok := part["cache_control"]; ok {
+			// Anthropic clients attach cache hints to content blocks. Neither
+			// Mistral route knows the field, and it is a hard validation error.
+			delete(part, "cache_control")
+			changed = true
 		}
 		kind, _ := part["type"].(string)
 		if kind != "input_text" && kind != "output_text" {
@@ -421,6 +520,11 @@ var effortByModel = map[string][]string{
 	"mistral-vibe-cli-fast":       {"none", "high"},
 	"zai-glm-5-3":                 {"low", "high", "max"},
 	"zai-glm-5-3-flash":           {"low", "high", "max"},
+	// Verified against both the native and the OpenAI-compatible route: the
+	// deepseek route accepts none/low/high/xhigh/max and rejects medium and
+	// minimal with a 400. Leaving it on the generic ladder passed "medium"
+	// through untouched, so a client that asked for medium always failed.
+	"deepseek-v4-1-flash-1017": {"none", "low", "high", "xhigh", "max"},
 }
 
 var defaultEffortLadder = []string{"none", "low", "medium", "high", "xhigh", "max"}

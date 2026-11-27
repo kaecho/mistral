@@ -172,6 +172,7 @@ select { max-width:100%; }
 .field { display:flex; justify-content:space-between; gap:16px; align-items:center; padding:13px 0; border-top:1px solid var(--line); }
 .field.full { grid-column:1/-1; flex-direction:column; align-items:stretch; }
 .field.full input { width:100%; }
+.field.full select { width:100%; }
 .field label { font-size:13px; }
 .field .hint { color:var(--muted); font-size:11.5px; display:block; margin-top:2px; }
 .field input[type=number] { width:110px; }
@@ -357,6 +358,11 @@ const STRINGS = {
     configHint: '保存后写入 CPA 配置文件的 plugins.configs.mistral 块。',
     baseUrl: 'Base URL',
     baseUrlHint: 'Mistral API 地址，带 /v1。',
+    endpoint: '请求端点',
+    endpointHint: '自动：官方地址用 /openai/v1 兼容端点，自定义地址用原生 /v1。',
+    endpointAuto: '自动',
+    endpointOpenAI: 'OpenAI 兼容 (/openai/v1)',
+    endpointNative: '原生 (/v1)',
     logRetentionHint: '10 到 5000。',
     idleHint: '0 为关闭，单位秒。',
     cooldown: '冷却基数',
@@ -577,6 +583,11 @@ const STRINGS = {
     configHint: 'Saving writes the plugins.configs.mistral block in the CPA config file.',
     baseUrl: 'Base URL',
     baseUrlHint: 'Mistral API address, including /v1.',
+    endpoint: 'Request endpoint',
+    endpointHint: 'Auto: the official host uses the /openai/v1 facade, a custom host keeps the native /v1 route.',
+    endpointAuto: 'Auto',
+    endpointOpenAI: 'OpenAI-compatible (/openai/v1)',
+    endpointNative: 'Native (/v1)',
     logRetentionHint: '10 to 5000.',
     idleHint: 'Seconds. 0 disables it.',
     cooldown: 'Cooldown base',
@@ -1057,7 +1068,7 @@ function renderOverview() {
     ? (data.active_label ? t('activeCredential', {label:esc(data.active_label)}) : t('failoverNote'))
     : t('setupNote');
   document.querySelector('#overview').innerHTML = '<div class="overview"><div class="stack">'
-    + '<div class="card"><div class="route-head"><div><span class="eyebrow">' + t('upstreamRoute') + '</span><div class="route-url">' + esc(data.base_url) + '</div><div class="route-note">' + routeNote + '</div></div>'
+    + '<div class="card"><div class="route-head"><div><span class="eyebrow">' + t('upstreamRoute') + '</span><div class="route-url">' + esc(data.chat_endpoint || data.base_url) + '</div><div class="route-note">' + routeNote + '</div></div>'
     + '<span class="state ' + (data.configured ? 'ok' : 'warn') + '"><i></i>' + (data.configured ? t('ready') : t('notReady')) + '</span></div>'
     + '<div class="pulse-box"><div class="pulse-head"><b>' + t('requestPulse') + '</b><span>' + t('pulseSummary', {n:pulseItems.length}) + '</span></div>' + pulse + '</div>'
     + '<div class="ledger">'
@@ -1255,6 +1266,11 @@ function renderConfig() {
     '<div class="card"><div class="view-head"><div><h2>' + t('configTitle') + '</h2><p>' + t('configHint') + '</p></div></div>'
     + '<div class="config-grid">'
     + '<div class="field full"><label for="base">' + t('baseUrl') + '<span class="hint">' + t('baseUrlHint') + '</span></label><input id="base" value="' + esc(data.base_url) + '"></div>'
+    + '<div class="field full"><label for="endpoint">' + t('endpoint') + '<span class="hint">' + t('endpointHint') + '</span></label><select id="endpoint">'
+    + '<option value="auto"' + ((data.endpoint || 'auto') === 'auto' ? ' selected' : '') + '>' + t('endpointAuto') + '</option>'
+    + '<option value="openai"' + (data.endpoint === 'openai' ? ' selected' : '') + '>' + t('endpointOpenAI') + '</option>'
+    + '<option value="native"' + (data.endpoint === 'native' ? ' selected' : '') + '>' + t('endpointNative') + '</option>'
+    + '</select></div>'
     + '<div class="field full"><label for="console">' + t('consoleUrl') + '<span class="hint">' + t('consoleUrlHint') + '</span></label><input id="console" value="' + esc(data.console_url || '') + '"></div>'
     + '<div class="field"><label for="keep">' + t('logRetention') + '<span class="hint">' + t('logRetentionHint') + '</span></label><input id="keep" type="number" min="10" max="5000" value="' + data.log_retention + '"></div>'
     + '<div class="field"><label for="idle">' + t('idleCutoff') + '<span class="hint">' + t('idleHint') + '</span></label><input id="idle" type="number" min="0" max="3600" value="' + (data.stream_idle_seconds || 0) + '"></div>'
@@ -1266,6 +1282,7 @@ function renderConfig() {
     + '</div><div class="form"><button class="primary" id="save-settings">' + t('saveSettings') + '</button><span class="muted">' + t('failoverOffHint') + '</span></div></div>';
   document.querySelector('#save-settings').onclick = () => applyAction({
     action:'put-settings', base_url:val('#base'), log_retention:Number(val('#keep')),
+    endpoint:val('#endpoint'),
     stream_idle_seconds:Number(val('#idle')), failover:document.querySelector('#failover').checked,
     ignore_proxy:document.querySelector('#ignore-proxy').checked,
     cooldown_seconds:Number(val('#cooldown')),

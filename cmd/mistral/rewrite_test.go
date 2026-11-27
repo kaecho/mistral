@@ -7,7 +7,7 @@ import (
 
 func TestRequestMovesReasoningAndDropsStore(t *testing.T) {
 	in := []byte(`{"model":"deepseek-v4.1-flash","store":false,"reasoning_effort":"max","messages":[{"role":"assistant","content":"4","reasoning_content":"add"},{"role":"user","content":"ok","refusal":null}]}`)
-	out, ok := rewriteRequestBody(in, nil, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash")
+	out, ok := rewriteRequestBody(in, nil, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash", false)
 	if !ok {
 		t.Fatal("expected rewrite")
 	}
@@ -44,7 +44,7 @@ func TestRequestMovesReasoningAndDropsStore(t *testing.T) {
 
 func TestRequestIgnoresOtherModels(t *testing.T) {
 	in := []byte(`{"store":false,"messages":[{"role":"assistant","content":"4","reasoning_content":"add"}]}`)
-	if _, ok := rewriteRequestBody(in, nil, "gpt-5.6", "gpt-5.6"); ok {
+	if _, ok := rewriteRequestBody(in, nil, "gpt-5.6", "gpt-5.6", false); ok {
 		t.Fatal("rewrote unrelated model")
 	}
 }
@@ -106,7 +106,7 @@ func TestRequestDropsFieldsMistralRejects(t *testing.T) {
 			{"role":"assistant","content":"ok","reasoning_content":"hm","refusal":null,"name":"a"},
 			{"role":"user","content":[{"type":"input_text","text":"again"}]}
 		]}`)
-	out, ok := rewriteRequestBody(in, []string{"*"}, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash")
+	out, ok := rewriteRequestBody(in, []string{"*"}, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash", false)
 	if !ok {
 		t.Fatal("expected rewrite")
 	}
@@ -156,7 +156,7 @@ func TestEffortFollowsModelLadder(t *testing.T) {
 		{"zai-glm-5-3", "low", "low"},
 		{"mistral-vibe-cli-latest", "max", "high"},
 		{"mistral-vibe-cli-latest", "high", "high"},
-		{"deepseek-v4-1-flash-1017", "medium", "medium"},
+		{"deepseek-v4-1-flash-1017", "medium", "high"},
 		{"deepseek-v4-1-flash-1017", "minimal", "low"},
 		{"deepseek-v4-1-flash-1017", "xhigh", "xhigh"},
 	}
@@ -204,5 +204,95 @@ func TestEffortNearestLevelMatchesUpstream(t *testing.T) {
 		if got := normalizeEffort(tc.model, tc.in); got != tc.want {
 			t.Fatalf("normalizeEffort(%q, %q) = %q, want %q", tc.model, tc.in, got, tc.want)
 		}
+	}
+}
+
+// The compatibility endpoint speaks the OpenAI schema: reasoning_content is
+// legal and must survive, while the standard OpenAI fields the old sanitizer
+// did not know (seed/user/metadata/max_completion_tokens) must survive too.
+func TestCompatRequestKeepsOpenAIFields(t *testing.T) {
+	in := []byte(`{"model":"deepseek-v4.1-flash","store":false,"reasoning_effort":"high","service_tier":"auto","prompt_cache_retention":"24h","top_k":5,"seed":42,"user":"u1","metadata":{"a":"b"},"max_completion_tokens":32,"prompt_cache_key":"cache-1","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"hi","name":"bob"},{"role":"assistant","content":"ok","reasoning_content":"hm","prefix":true,"refusal":null,"name":"a","annotations":[]},{"role":"tool","tool_call_id":"c1","content":"r","name":"g"}]}`)
+	out, ok := rewriteRequestBody(in, []string{"*"}, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash", true)
+	if !ok {
+		t.Fatal("expected rewrite")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"store", "service_tier", "prompt_cache_retention", "top_k"} {
+		if _, exists := doc[key]; exists {
+			t.Fatalf("%s survived", key)
+		}
+	}
+	for _, key := range []string{"seed", "user", "metadata", "max_completion_tokens", "prompt_cache_key"} {
+		if _, exists := doc[key]; !exists {
+			t.Fatalf("%s was dropped", key)
+		}
+	}
+	messages := doc["messages"].([]any)
+	if messages[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("developer role = %#v", messages[0])
+	}
+	if _, exists := messages[1].(map[string]any)["name"]; exists {
+		t.Fatal("user name survived")
+	}
+	assistant := messages[2].(map[string]any)
+	if assistant["reasoning_content"] != "hm" {
+		t.Fatalf("reasoning_content = %#v", assistant["reasoning_content"])
+	}
+	if assistant["content"] != "ok" || assistant["name"] != "a" {
+		t.Fatalf("assistant = %#v", assistant)
+	}
+	for _, key := range []string{"prefix", "refusal", "annotations"} {
+		if _, exists := assistant[key]; exists {
+			t.Fatalf("assistant %s survived", key)
+		}
+	}
+	toolMsg := messages[3].(map[string]any)
+	if _, exists := toolMsg["name"]; exists {
+		t.Fatal("tool name survived")
+	}
+}
+
+// A client replaying a native Mistral response sends thinking blocks. The
+// compatibility route rejects those, so they are flattened back into
+// reasoning_content instead of being forwarded as content parts.
+func TestCompatFlattensNativeThinkingParts(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":[{"type":"text","text":"because"}],"closed":true},{"type":"text","text":"4"}]},{"role":"user","content":"ok"}]}`)
+	out, ok := rewriteRequestBody(in, []string{"*"}, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash", true)
+	if !ok {
+		t.Fatal("expected rewrite")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	assistant := doc["messages"].([]any)[1].(map[string]any)
+	if assistant["reasoning_content"] != "because" {
+		t.Fatalf("reasoning_content = %#v", assistant["reasoning_content"])
+	}
+	parts := assistant["content"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["text"] != "4" {
+		t.Fatalf("content = %#v", assistant["content"])
+	}
+}
+
+func TestCompatStripsCacheControlAndNormalizesParts(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	out, ok := rewriteRequestBody(in, []string{"*"}, "deepseek-v4-1-flash-1017", "deepseek-v4.1-flash", true)
+	if !ok {
+		t.Fatal("expected rewrite")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	part := doc["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["type"] != "text" {
+		t.Fatalf("type = %#v", part["type"])
+	}
+	if _, exists := part["cache_control"]; exists {
+		t.Fatal("cache_control survived")
 	}
 }

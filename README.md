@@ -15,7 +15,7 @@ Connect Mistral to CLIProxyAPI (CPA). Clients keep using CPA's address and key.
 
 ## What it does
 
-- Accepts OpenAI Chat Completions, Responses, Claude, and Gemini requests and converts them to Mistral chat completions.
+- Accepts OpenAI Chat Completions, Responses, Claude, and Gemini requests and converts them to Mistral chat completions (the `/openai/v1` compatibility facade by default).
 - Rewrites Mistral thinking blocks into the field each protocol expects, so clients do not have to parse arrays inside `delta.content`.
 - Manages multiple Mistral API keys. Each key can have a priority, be disabled, or be tested on its own.
 - Fails over to the next credential when the upstream rejects the current one, and keeps recently failed keys out of the first attempt.
@@ -74,6 +74,7 @@ plugins:
       priority: 100
       base-url: "https://api.mistral.ai/v1"
       console-url: "https://console.mistral.ai"
+      endpoint: "auto"
       log-retention: 200
       stream-idle-seconds: 0
       failover: true
@@ -103,7 +104,8 @@ plugins:
 
 | Field | Meaning |
 | --- | --- |
-| `base-url` | Mistral API base URL, including `/v1`. Defaults to `https://api.mistral.ai/v1`. |
+| `base-url` | Mistral API base URL, including `/v1`. Defaults to `https://api.mistral.ai/v1`. Model listing and billing always use this address. |
+| `endpoint` | `auto` (default), `openai`, or `native`. `auto` uses `https://api.mistral.ai/openai/v1/chat/completions` on the official host and keeps the native `/chat/completions` path on a custom host; `openai` forces the compatibility facade; `native` forces the old route. The facade accepts `store=false`, `developer`, `reasoning_content`, `seed`, `user`, `metadata`, `max_completion_tokens` and similar fields the native route rejects with 422, and returns thinking as `reasoning_content` directly. |
 | `console-url` | Console origin used to read the key scope from `/api/vibe/whoami`. Defaults to `https://console.mistral.ai`. Empty disables scope detection, so nothing is paused automatically. |
 | `log-retention` | Number of request log entries to keep, from 10 to 5000. |
 | `stream-idle-seconds` | Stream idle cutoff. 0 disables it. Above 0, an upstream request is cancelled after this many seconds without new bytes. |
@@ -118,6 +120,8 @@ plugins:
 | `models[].upstream-id` | Model ID sent to Mistral. |
 | `models[].reasoning` | Empty passes through the client's `reasoning_effort`. A value such as `low`, `medium`, `high`, `xhigh`, or `max` forces an override. |
 
+If a gateway only implements the native `/v1` route, set `endpoint` to `native`; the same applies if `/openai/v1` answers 404 on the official host.
+
 ## Calling a model
 
 With the mapping `deepseek-v4.1-flash` → `deepseek-v4-1-flash-1017`, send the client-side name as `model`:
@@ -130,11 +134,11 @@ With the mapping `deepseek-v4.1-flash` → `deepseek-v4-1-flash-1017`, send the 
 }
 ```
 
-The plugin replaces `model` with the upstream ID, keeps `reasoning_effort`, removes fields Mistral rejects (`store`, plus `reasoning_content`, `reasoning`, and `refusal` on assistant messages), and folds old thinking content back into the content array Mistral understands.
+The plugin replaces `model` with the upstream ID and keeps `reasoning_effort`. The default `endpoint: auto` uses the OpenAI-compatible facade on the official host, so `store=false`, `developer`, `reasoning_content` and similar fields pass through. Only `native` removes what the old route rejects (`store`, plus `reasoning_content`, `reasoning`, and `refusal` on assistant messages) and folds old thinking content back into the content array Mistral understands.
 
 ## Thinking blocks
 
-Mistral returns thinking content as elements in a `delta.content` array, such as `{"type":"thinking", ...}`. The plugin only declares `chat-completions` as its output format, so it first splits thinking into OpenAI's `reasoning_content`. CPA then converts that into the field the client protocol uses:
+The compatibility endpoint returns thinking as `reasoning_content`, and streaming deltas as `delta.reasoning_content`. The native endpoint returns thinking content as elements in a `delta.content` array, such as `{"type":"thinking", ...}`; the plugin splits those into `reasoning_content`. Both paths hand CPA the same output format, which CPA then converts into the field the client protocol uses:
 
 | Client protocol | Thinking field |
 | --- | --- |

@@ -15,7 +15,7 @@
 
 ## 这个插件做什么
 
-- 接收 OpenAI Chat Completions、Responses、Claude、Gemini 四种请求，统一转成 Mistral 的 chat completions。
+- 接收 OpenAI Chat Completions、Responses、Claude、Gemini 四种请求，统一转成 Mistral 的 chat completions（默认走 `/openai/v1` 兼容端点）。
 - 把 Mistral 返回的思考块改写成各协议自己的字段，客户端不用猜 `delta.content` 里的数组结构。
 - 管理多把 Mistral API key。每把可以设优先级、停用、单独检测。
 - 上游失败时自动换下一把凭据，并按冷却时间避开刚失败的 key。
@@ -74,6 +74,7 @@ plugins:
       priority: 100
       base-url: "https://api.mistral.ai/v1"
       console-url: "https://console.mistral.ai"
+      endpoint: "auto"
       log-retention: 200
       stream-idle-seconds: 0
       failover: true
@@ -103,7 +104,8 @@ plugins:
 
 | 字段 | 说明 |
 | --- | --- |
-| `base-url` | Mistral API 地址，带 `/v1`。默认 `https://api.mistral.ai/v1`。 |
+| `base-url` | Mistral API 地址，带 `/v1`。默认 `https://api.mistral.ai/v1`。模型列表和账单接口始终走这个地址。 |
+| `endpoint` | `auto`（默认）、`openai` 或 `native`。`auto` 在官方地址上用 `https://api.mistral.ai/openai/v1/chat/completions`，自定义地址上保持原生 `/chat/completions`；`openai` 强制走兼容端点；`native` 强制回原生端点。兼容端点接受 `store=false`、`developer`、`reasoning_content`、`seed`、`user`、`metadata`、`max_completion_tokens` 等原生端点会 422 的字段，并直接返回 `reasoning_content`。 |
 | `console-url` | 控制台地址，用来读 `/api/vibe/whoami` 判断 key 的计费额度。默认 `https://console.mistral.ai`。留空则不判断 key 类型，也不会自动停用。 |
 | `log-retention` | 保留多少条请求日志，范围 10 到 5000。 |
 | `stream-idle-seconds` | 流式空闲截断。0 关闭，大于 0 时上游超过这个秒数没有新字节就取消本次请求。 |
@@ -118,6 +120,8 @@ plugins:
 | `models[].upstream-id` | 实际发给 Mistral 的模型 ID。 |
 | `models[].reasoning` | 留空则沿用客户端的 `reasoning_effort`。填 `low`、`medium`、`high`、`xhigh`、`max` 等值时强制覆盖。 |
 
+如果网关只实现了原生 `/v1`，把 `endpoint` 设为 `native`；官方地址上如果 `/openai/v1` 返回 404，也切回 `native`。
+
 ## 调用模型
 
 假设映射是 `deepseek-v4.1-flash` → `deepseek-v4-1-flash-1017`，向 CPA 发请求时 `model` 填客户端名称：
@@ -130,11 +134,11 @@ plugins:
 }
 ```
 
-插件会把请求体里的 `model` 换成上游 ID，保留 `reasoning_effort`，去掉 Mistral 不接受的字段（比如 `store`，以及 assistant 消息上的 `reasoning_content`、`reasoning`、`refusal`），再把历史里的思考内容折回 Mistral 认识的 content 数组。
+插件会把请求体里的 `model` 换成上游 ID，保留 `reasoning_effort`。默认的 `endpoint: auto` 在官方地址上使用 OpenAI 兼容端点，`store=false`、`developer`、`reasoning_content` 等字段可以直接透传；只有 `native` 模式才会去掉原生端点不接受的字段（`store`，以及 assistant 消息上的 `reasoning_content`、`reasoning`、`refusal`），并把历史里的思考内容折回 Mistral 认识的 content 数组。
 
 ## 思考块
 
-Mistral 把思考内容放在 `delta.content` 数组里，元素形如 `{"type":"thinking", ...}`。插件的出口只声明 `chat-completions`，所以会先把思考块拆成 OpenAI 的 `reasoning_content`，再由 CPA 转成其他协议：
+兼容端点直接把思考内容放在 `reasoning_content` 里返回，流式时是 `delta.reasoning_content`。原生端点则把思考内容放在 `delta.content` 数组里，元素形如 `{"type":"thinking", ...}`，插件会把它拆成 `reasoning_content`。两条路最终给 CPA 的都是同一种出口，再由 CPA 转成其他协议：
 
 | 客户端协议 | 思考字段 |
 | --- | --- |

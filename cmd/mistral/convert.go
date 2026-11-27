@@ -2,7 +2,7 @@ package main
 
 import "strings"
 
-func toMistralChat(payload, original []byte, sourceFormat, model string, stream bool) ([]byte, bool) {
+func toMistralChat(payload, original []byte, sourceFormat, model string, stream, compat bool) ([]byte, bool) {
 	source := normalizeFormat(sourceFormat)
 	body := payload
 	if source == "" || source == "openai" {
@@ -37,7 +37,7 @@ func toMistralChat(payload, original []byte, sourceFormat, model string, stream 
 	// Sanitize the converted map in place. Encoding it just to decode it again
 	// inside rewriteRequestBody cost two extra full passes over a payload that
 	// can be hundreds of kilobytes.
-	rewriteRequestDoc(chat, model)
+	rewriteRequestDoc(chat, model, compat)
 	chat["model"] = model
 	chat["stream"] = stream
 	raw, err := encodeJSON(chat)

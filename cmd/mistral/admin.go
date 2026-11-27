@@ -43,8 +43,10 @@ func publicState() map[string]any {
 	if len(recent) > 30 {
 		recent = recent[:30]
 	}
+	chatEndpoint, _ := current.chatEndpoint()
 	return map[string]any{
 		"base_url": current.BaseURL, "console_url": current.ConsoleURL,
+		"endpoint": normalizeEndpoint(current.Endpoint), "chat_endpoint": chatEndpoint,
 		"log_retention":       current.LogRetention,
 		"stream_idle_seconds": current.StreamIdleSeconds,
 		"failover":            current.Failover, "ignore_proxy": current.IgnoreProxy,
@@ -75,6 +77,7 @@ type adminRequest struct {
 	Reasoning         string       `json:"reasoning"`
 	BaseURL           string       `json:"base_url"`
 	ConsoleURL        *string      `json:"console_url"`
+	Endpoint          string       `json:"endpoint"`
 	LogRetention      int          `json:"log_retention"`
 	StreamIdleSeconds *int         `json:"stream_idle_seconds"`
 	Failover          *bool        `json:"failover"`
@@ -172,6 +175,9 @@ func handleAdmin(body []byte, callbackID string) (int, []byte) {
 		}
 		if req.ConsoleURL != nil {
 			next.ConsoleURL = strings.TrimRight(strings.TrimSpace(*req.ConsoleURL), "/")
+		}
+		if value := strings.TrimSpace(req.Endpoint); value != "" {
+			next.Endpoint = normalizeEndpoint(value)
 		}
 		if req.LogRetention > 0 {
 			next.LogRetention = req.LogRetention
@@ -287,6 +293,11 @@ func validateRuntimeSettings(current settings) error {
 		if err != nil || parsedConsole.Host == "" || (parsedConsole.Scheme != "http" && parsedConsole.Scheme != "https") {
 			return fmt.Errorf("console URL must be an http or https URL, or empty")
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(current.Endpoint)) {
+	case "", endpointAuto, endpointOpenAI, endpointNative:
+	default:
+		return fmt.Errorf("endpoint must be auto, openai, or native")
 	}
 	if current.LogRetention < 10 || current.LogRetention > 5000 {
 		return fmt.Errorf("log retention must be between 10 and 5000")
